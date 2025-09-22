@@ -1,361 +1,199 @@
-import tkinter as tk
-import tkinter.messagebox as msgbox
-import threading
-import keyboard
+import sys
 import time
+import threading
 import pyperclip
+import keyboard
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLineEdit, QListWidget, QListWidgetItem,
+    QPushButton, QLabel, QMessageBox, QTextEdit
+)
+from PyQt6.QtCore import Qt, QTimer
 
 from window_manager import activate_window
 
-class ClipboardGUI:
-    def __init__(self, root, history_manager, config):
-        self.root = root
+
+class ClipboardGUI(QMainWindow):
+    def __init__(self, history_manager, config):
+        super().__init__()
         self.history_manager = history_manager
         self.config = config
-        self.cmd_queue = config.get('cmd_queue')
+        self.cmd_queue = config.get("cmd_queue")
+
+        self.full_history = []
+        self.filtered_items = []
         self.previous_window = None
+        self.current_window = None
         self.displayed_version = 0
-        self.top_window = None
-        self.window_lock = threading.Lock()
-        self.full_history = []  # 保存完整历史记录用于搜索过滤
-        self.filtered_items = []  # 新增：保存当前过滤后的项目列表
 
-        # 初始化主窗口
-        self.root.withdraw()  # 隐藏主窗口
-        self.setup_hotkey()
+        # === 窗口设置 ===
+        self.setWindowTitle(config.get("window_title", "剪贴板历史"))
+        self.resize(*[int(x) for x in config.get("window_size", "500x1000").split("x")])
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
 
-    def setup_hotkey(self):
-        """注册全局热键"""
-        keyboard.add_hotkey(
-            self.config['hotkey'],
-            self.on_hotkey
-        )
+        # === 主布局 (左右分栏) ===
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+
+        # ---------- 左边区域 ----------
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+
+        # 搜索栏
+        search_layout = QHBoxLayout()
+        self.search_entry = QLineEdit()
+        self.search_entry.setPlaceholderText("搜索...")
+        self.search_entry.textChanged.connect(self.filter_list)
+        clear_btn = QPushButton("×")
+        clear_btn.setFixedWidth(30)
+        clear_btn.clicked.connect(lambda: self.search_entry.clear())
+        search_layout.addWidget(QLabel("搜索:"))
+        search_layout.addWidget(self.search_entry)
+        search_layout.addWidget(clear_btn)
+        left_layout.addLayout(search_layout)
+
+        # 列表
+        self.list_widget = QListWidget()
+        self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list_widget.itemDoubleClicked.connect(self.select_and_copy)
+        self.list_widget.currentItemChanged.connect(self.update_preview)  # 选中项改变时更新右侧预览
+        self.list_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # 确保列表可以获得焦点
+        left_layout.addWidget(self.list_widget)
+
+        # 底部栏
+        bottom_layout = QHBoxLayout()
+        self.status_label = QLabel("历史记录: 0 条")
+        clear_history_btn = QPushButton("清空历史")
+        clear_history_btn.setObjectName("clearButton")  # 方便 QSS 单独美化
+        clear_history_btn.clicked.connect(self.clear_history_confirm)
+        bottom_layout.addWidget(self.status_label)
+        bottom_layout.addStretch()
+        bottom_layout.addWidget(clear_history_btn)
+        left_layout.addLayout(bottom_layout)
+
+        # ---------- 右边预览 ----------
+        self.preview = QTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setPlaceholderText("选中一个条目后在此预览完整内容...")
+        #self.preview.setStyleSheet("background:#fafafa; border:1px solid #cccccc; border-radius:6px;")
+
+        # ---------- 添加到主布局 ----------
+        main_layout.addWidget(left_widget, 3)   # 左边占比 2
+        main_layout.addWidget(self.preview, 3)  # 右边占比 3
+
+        # === 热键注册 ===
+        keyboard.add_hotkey(self.config["hotkey"], self.on_hotkey)
+
+        # === 定时器轮询队列 ===
+        self.queue_timer = QTimer()
+        self.queue_timer.timeout.connect(self.poll_queue)
+        self.queue_timer.start(self.config.get("queue_poll_ms", 200))
+
+        # 初始加载
+        self.refresh_listbox()
+
+    # ---------------- 功能逻辑 ----------------
+
+    def closeEvent(self, event):
+        """重写关闭事件，改为隐藏窗口而非退出程序"""
+        event.ignore()  # 忽略默认关闭行为
+        self.hide()     # 隐藏窗口
+
+    def update_preview(self, current, previous):
+        """更新右侧预览区"""
+        if current:
+            text = current.data(Qt.ItemDataRole.UserRole)
+            self.preview.setPlainText(text)
+        else:
+            self.preview.clear()
+
 
     def on_hotkey(self):
-        """热键回调"""
-        self.previous_window = self.config['get_active_window']()
+        if self.current_window and self.current_window != self.previous_window:
+            self.previous_window = self.current_window
         try:
             self.cmd_queue.put_nowait("show")
         except Exception:
             pass
 
     def open_history_window(self):
-        """打开历史记录窗口"""
-        with self.window_lock:
-            # 窗口已存在则刷新并置顶
-            if self.top_window and self.top_window.winfo_exists():
-                try:
-                    self.top_window.deiconify()
-                    self.top_window.lift()
-                    self.top_window.focus_force()
-                    if self.displayed_version != self.history_manager.version:
-                        self.refresh_listbox()
-                except Exception:
-                    pass
-                return
-
-            # 创建新窗口
-            top = tk.Toplevel(self.root)
-            top.title(self.config['window_title'])
-            top.geometry(self.config['window_size'])
-            top.attributes("-topmost", True)
-
-            # 窗口居中
-            top.update_idletasks()
-            width = top.winfo_width()
-            height = top.winfo_height()
-            x = (top.winfo_screenwidth() // 2) - (width // 2)
-            y = (top.winfo_screenheight() // 2) - (height // 2)
-            top.geometry(f"{width}x{height}+{x}+{y}")
-
-            # 创建搜索框
-            search_frame = tk.Frame(top)
-            search_frame.pack(fill="x", padx=5, pady=5)
-            
-            search_label = tk.Label(search_frame, text="搜索:", font=self.config['status_font'])
-            search_label.pack(side="left")
-            
-            search_var = tk.StringVar()
-            search_entry = tk.Entry(
-                search_frame, 
-                textvariable=search_var, 
-                font=self.config['status_font'],
-                width=30
-            )
-            search_entry.pack(side="left", fill="x", expand=True, padx=5)
-            search_entry.bind("<KeyRelease>", lambda e: self.filter_list(search_var.get()))
-            
-            # 清空搜索按钮
-            clear_search_btn = tk.Button(
-                search_frame,
-                text="×",
-                command=lambda: self.clear_search(search_var),
-                font=("Arial", 10),
-                width=2
-            )
-            clear_search_btn.pack(side="right")
-
-            # 创建列表框和滚动条
-            frame = tk.Frame(top)
-            frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
-            scrollbar = tk.Scrollbar(frame)
-            scrollbar.pack(side="right", fill="y")
-            listbox = tk.Listbox(
-                frame, 
-                font=self.config['font_setting'], 
-                yscrollcommand=scrollbar.set,
-
-                #样式
-                activestyle='none',           # 移除选中时的虚线框
-                highlightthickness=0,         # 移除高亮边框
-                selectbackground='#DDEEFF',   # 设置选中项背景色
-                selectforeground='black',     # 设置选中项文字颜色
-                relief='flat',                # 使用扁平样式
-                borderwidth=1,                 # 边框宽度
-                height=15   # 固定显示的行数，让间距效果更明显
-            )
-            listbox.pack(side="left", fill="both", expand=True,padx=(0, 5))
-            scrollbar.config(command=listbox.yview)
-            
-            top.listbox = listbox
-            top.search_var = search_var  # 保存搜索变量引用
-
-            # 保存完整历史记录用于搜索
-            self.full_history = self.history_manager.get_copy()
-            self.filtered_items = self.full_history.copy()  # 初始时显示全部
-
-            
-            # 填充初始数据
-            for item in self.full_history:
-                listbox.insert(tk.END, item)
-                # 添加一个空行作为间距
-                listbox.insert(tk.END, "---")
-            self.displayed_version = self.history_manager.version
-
-            # 状态栏
-            status_frame = tk.Frame(top)
-            status_frame.pack(fill="x", padx=5, pady=2)
-            self.status_label = tk.Label(
-                status_frame, 
-                text=f"历史记录: {self.history_manager.get_length()} 条",
-                font=self.config['status_font'], 
-                fg="gray"
-            )
-            self.status_label.pack(side="left")
-
-            # 清空按钮
-            clear_button = tk.Button(
-                status_frame, 
-                text="清空历史",
-                command=lambda: self.clear_history_confirm(top),
-                font=self.config['status_font']
-            )
-            clear_button.pack(side="right")
-
-            # 绑定事件
-            listbox.bind("<Double-Button-1>", self.select_and_copy)
-            listbox.bind("<Return>", self.select_and_copy)
-            listbox.bind("<KP_Enter>", self.select_and_copy)
-            top.bind("<Escape>", lambda e: self.close_top_window())
-            listbox.bind("<Escape>", lambda e: self.close_top_window())
-            top.protocol("WM_DELETE_WINDOW", self.close_top_window)
-            
-            # 搜索框快捷键
-            search_entry.bind("<Control-f>", lambda e: search_entry.focus())
-            search_entry.bind("<Escape>", lambda e: self.close_top_window())
-
-            # 初始选中
-            if listbox.size() > 0:
-                listbox.selection_set(0)
-                listbox.activate(0)
-            search_entry.focus_set()  # 初始焦点在搜索框
-
-            self.top_window = top
-
-    def clear_search(self, search_var):
-        """清空搜索框"""
-        search_var.set("")
-        self.filter_list("")
-
-
-    def filter_list(self, search_text):
-        """根据搜索文本过滤列表"""
-        if not hasattr(self.top_window, 'listbox'):
-            return
-            
-        listbox = self.top_window.listbox
-        search_text = search_text.lower().strip()
-        
-        # 保存当前选择
-        sel_text = None
-        try:
-            sel_idx = listbox.curselection()[0] if listbox.curselection() else None
-            if sel_idx is not None:
-                sel_text = listbox.get(sel_idx)
-        except Exception:
-            pass
-        
-        # 清空并重新填充
-        listbox.delete(0, tk.END)
-        self.filtered_items = []  # 重置过滤列表
-        
-        if search_text == "":
-            # 显示全部
-            self.filtered_items = self.full_history.copy()
-            for item in self.full_history:
-                listbox.insert(tk.END, item)
-        else:
-            # 过滤匹配项
-            for item in self.full_history:
-                if search_text in item.lower():
-                    listbox.insert(tk.END, item)
-                    self.filtered_items.append(item)
-        
-        # 更新状态栏
-        total_count = len(self.full_history)
-        filtered_count = len(self.filtered_items)
-        if search_text == "":
-            self.status_label.config(text=f"历史记录: {total_count} 条")
-        else:
-            self.status_label.config(text=f"找到 {filtered_count}/{total_count} 条匹配记录")
-        
-        # 恢复选择或设置默认选择
-        if listbox.size() > 0:
-            if sel_text and sel_text in self.filtered_items:
-                try:
-                    idx = self.filtered_items.index(sel_text)
-                    listbox.selection_set(idx)
-                    listbox.see(idx)
-                except ValueError:
-                    listbox.selection_set(0)
-            else:
-                listbox.selection_set(0)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.refresh_listbox()
+        # self.search_entry.setFocus()
 
     def refresh_listbox(self):
-        """刷新列表框内容"""
-        with self.window_lock:
-            if not self.top_window or not self.top_window.winfo_exists():
-                return
-            listbox = self.top_window.listbox
-            
-            # 获取当前搜索文本
-            search_text = ""
-            if hasattr(self.top_window, 'search_var'):
-                search_text = self.top_window.search_var.get().lower().strip()
-            
-            # 更新完整历史记录
-            self.full_history = self.history_manager.get_copy()
-            
-            # 保存当前选择
-            sel_text = None
-            try:
-                sel_idx = listbox.curselection()[0] if listbox.curselection() else None
-                if sel_idx is not None:
-                    sel_text = listbox.get(sel_idx)
-            except Exception:
-                pass
-            
-            # 清空并重新填充
-            listbox.delete(0, tk.END)
-            self.filtered_items = []  # 重置过滤列表
-            
-            if search_text == "":
-                # 显示全部
-                self.filtered_items = self.full_history.copy()
-                for item in self.full_history:
-                    listbox.insert(tk.END, item)
-            else:
-                # 过滤匹配项
-                for item in self.full_history:
-                    if search_text in item.lower():
-                        listbox.insert(tk.END, item)
-                        self.filtered_items.append(item)
-            
-            # 更新状态栏
-            total_count = len(self.full_history)
-            filtered_count = len(self.filtered_items)
-            if search_text == "":
-                self.status_label.config(text=f"历史记录: {total_count} 条")
-            else:
-                self.status_label.config(text=f"找到 {filtered_count}/{total_count} 条匹配记录")
-            
-            # 恢复选择
-            if listbox.size() > 0:
-                if sel_text and sel_text in self.filtered_items:
-                    try:
-                        idx = self.filtered_items.index(sel_text)
-                        listbox.selection_set(idx)
-                        listbox.see(idx)
-                    except ValueError:
-                        listbox.selection_set(0)
-                else:
-                    listbox.selection_set(0)
-            
-            self.displayed_version = self.history_manager.version
-        
-    def select_and_copy(self, event):
-        """处理选择和粘贴"""
-        if not hasattr(self.top_window, 'listbox'):
-            return
-        listbox = self.top_window.listbox
-        
-        try:
-            idx = listbox.curselection()[0] if listbox.curselection() else 0
-            
-            # 使用 filtered_items 来获取正确的文本内容
-            if 0 <= idx < len(self.filtered_items):
-                text = self.filtered_items[idx]
-                self.paste_immediately(text)
-            else:
-                print(f"[ERROR] 索引超出范围: {idx}")
-                
-        except Exception as e:
-            print(f"[ERROR] 选择处理失败: {e}")
+        self.full_history = self.history_manager.get_copy()
+        self.filter_list(self.search_entry.text())
+        self.status_label.setText(f"历史记录: {len(self.full_history)} 条")
+        self.displayed_version = self.history_manager.version
+
+        # 确保列表有项时选中第一项并让列表获得焦点
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+            self.list_widget.setFocus()  # 让列表获得焦点，光标不在搜索框
+
+    def filter_list(self, text):
+        text = text.strip().lower()
+        self.list_widget.clear()
+        self.filtered_items = []
+
+        for item in self.full_history:
+            if text in item.lower():
+                lw_item = QListWidgetItem(self.format_item_text(item))
+                lw_item.setData(Qt.ItemDataRole.UserRole, item)
+                self.list_widget.addItem(lw_item)
+                self.filtered_items.append(item)
+
+        if not text:
+            self.status_label.setText(f"历史记录: {len(self.full_history)} 条")
+        else:
+            self.status_label.setText(
+                f"找到 {len(self.filtered_items)}/{len(self.full_history)} 条匹配记录"
+            )
+
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+
+    def select_and_copy(self, item):
+        text = item.data(Qt.ItemDataRole.UserRole)
+        self.paste_immediately(text)
 
     def paste_immediately(self, text):
-        """立即粘贴到活动窗口"""
         def do_paste():
             try:
                 pyperclip.copy(text)
-                
-                # 激活之前的窗口
                 if self.previous_window:
                     success = activate_window(self.previous_window)
                     if success:
-                      time.sleep(0.1)  # 短暂等待窗口激活
+                        time.sleep(0.1)
                     else:
-                        keyboard.press_and_release('alt+tab')
+                        keyboard.press_and_release("alt+tab")
                         time.sleep(0.05)
                 else:
-                    keyboard.press_and_release('alt+tab')
+                    keyboard.press_and_release("alt+tab")
                     time.sleep(0.05)
-                
-                # 执行粘贴
-                keyboard.press_and_release('ctrl+v')
+
+                keyboard.press_and_release("ctrl+v")
             except Exception as e:
                 print(f"[ERROR] 粘贴失败: {e}")
 
         threading.Thread(target=do_paste, daemon=True).start()
 
-    def clear_history_confirm(self, parent):
-        """确认清空历史"""
-        if msgbox.askyesno("确认", "确定要清空所有历史记录吗？", parent=parent):
+    def clear_history_confirm(self):
+        reply = QMessageBox.question(
+            self, "确认", "确定要清空所有历史记录吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
             self.history_manager.clear()
             self.history_manager.save()
             self.refresh_listbox()
 
-    def close_top_window(self):
-        """关闭历史窗口"""
-        with self.window_lock:
-            if self.top_window and self.top_window.winfo_exists():
-                try:
-                    self.top_window.destroy()
-                except Exception:
-                    pass
-            self.top_window = None
-
     def poll_queue(self):
-        """轮询队列处理命令"""
         try:
             cmd = self.cmd_queue.get_nowait()
         except Exception:
@@ -364,8 +202,50 @@ class ClipboardGUI:
         if cmd == "show":
             self.open_history_window()
 
-        # 检查历史更新
         if self.displayed_version != self.history_manager.version:
             self.refresh_listbox()
 
-        self.root.after(self.config['queue_poll_ms'], self.poll_queue)
+    # ---------------- 文本格式化 ----------------
+
+    def format_item_text(self, text):
+        """格式化：一行最多 20 字符，最多三行"""
+        if not text:
+            return ""
+        text = text.strip()
+        if len(text) <= 20:
+            return text
+
+        lines, current_line = [], ""
+        words = text.split()
+
+        for word in words:
+            if len(current_line) + len(word) + (1 if current_line else 0) <= 20:
+                current_line += (" " if current_line else "") + word
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+                if len(lines) >= 3:
+                    if len(current_line) > 17:
+                        current_line = current_line[:17] + "..."
+                    else:
+                        current_line += "..."
+                    lines.append(current_line)
+                    break
+
+        if current_line and len(lines) < 3:
+            lines.append(current_line)
+        elif current_line and len(lines) >= 3:
+            last_line = lines[-1]
+            lines[-1] = (last_line[:17] + "...") if len(last_line) > 17 else last_line + "..."
+
+        return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    # ⚠️ 需要你传入 history_manager 和 config
+    # 示例：
+    # window = ClipboardGUI(history_manager, config)
+    # window.show()
+    sys.exit(app.exec())
