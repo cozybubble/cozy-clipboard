@@ -7,7 +7,7 @@ import keyboard
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem,
-    QPushButton, QLabel, QMessageBox, QTextEdit
+    QPushButton, QLabel, QMessageBox, QTextEdit, QSplitter  
 )
 from PyQt6.QtCore import Qt, QTimer
 
@@ -36,10 +36,17 @@ class ClipboardGUI(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)  # 去除边距，让分隔条贴边
+
+        # 创建水平分隔条
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(self.splitter)
+
 
         # ---------- 左边区域 ----------
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(5, 5, 5, 5)  # 添加适当的内边距
 
         # 搜索栏
         search_layout = QHBoxLayout()
@@ -79,9 +86,12 @@ class ClipboardGUI(QMainWindow):
         self.preview.setPlaceholderText("选中一个条目后在此预览完整内容...")
         #self.preview.setStyleSheet("background:#fafafa; border:1px solid #cccccc; border-radius:6px;")
 
-        # ---------- 添加到主布局 ----------
-        main_layout.addWidget(left_widget, 3)   # 左边占比 2
-        main_layout.addWidget(self.preview, 3)  # 右边占比 3
+        # ---------- 将左右部件添加到分隔条 ----------
+        self.splitter.addWidget(left_widget)
+        self.splitter.addWidget(self.preview)
+
+        # 设置初始比例（可根据需要调整）
+        self.splitter.setSizes([300, 400])  # 左边300，右边400
 
         # === 热键注册 ===
         keyboard.add_hotkey(self.config["hotkey"], self.on_hotkey)
@@ -108,7 +118,6 @@ class ClipboardGUI(QMainWindow):
             self.preview.setPlainText(text)
         else:
             self.preview.clear()
-
 
     def on_hotkey(self):
         if self.current_window and self.current_window != self.previous_window:
