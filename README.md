@@ -8,3 +8,4 @@
 
 ## demo展示：
 ![demo](./docs/demo.png)
+![demo2](./docs/demo2.png)
