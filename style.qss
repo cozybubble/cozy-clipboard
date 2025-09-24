@@ -18,16 +18,22 @@ QLineEdit::placeholder {
     color: #86868b;
 }
 
-
 /* 可选：如果需要完全移除所有焦点状态的视觉提示 */
 QListWidget:focus {
     outline: none;
 }
 
-/* 列表项样式 */
+/* 列表项样式 - 修改为支持更大图片 */
 QListWidget::item {
-    padding: 6px 8px;
-    border-bottom: 1px solid #666666;
+    padding: 12px 8px;  /* 增加上下内边距从6px到12px */
+    border-bottom: 1px solid #e5e5e7;  /* 使用更淡的分割线 */
+    min-height: 60px;   /* 设置最小高度，确保有足够空间显示图片 */
+}
+
+/* 专门为图片项设置更大的空间 */
+QListWidget::item[hasImage="true"] {
+    padding: 16px 8px;  /* 图片项使用更大的内边距 */
+    min-height: 120px;  /* 图片项最小高度更大 */
 }
 
 QListWidget::item:selected {

@@ -48,17 +48,26 @@ class HistoryManager:
         except Exception as e:
             print(f"[ERROR] 保存历史记录失败: {e}")
 
-    def add_item(self, text):
-        """添加新项到历史记录"""
-        if not text or text.strip() == "":
+    def add_item(self, entry):
+        """添加新项到历史记录
+        entry: {"type": "text"|"image", "data": str}
+        """
+        if not entry:
+            return False
+
+        if isinstance(entry, str):
+            # 向下兼容旧格式
+            entry = {"type": "text", "data": entry}
+
+        if entry.get("type") == "text" and (not entry.get("data") or entry.get("data").strip() == ""):
             return False
 
         with self.history_lock:
-            # 避免重复项
-            if self.history and self.history[0] == text:
+            # 避免和最新项重复
+            if self.history and self.history[0] == entry:
                 return False
-                
-            self.history.insert(0, text)
+
+            self.history.insert(0, entry)
             if len(self.history) > self.max_items:
                 del self.history[self.max_items:]
             self.version += 1
